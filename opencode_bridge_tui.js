@@ -29,14 +29,29 @@ app.get('/v1/models', async (req, res) => {
         const providers = await opencode.config.providers();
         const models = [];
 
-        for (const provider of providers.data.providers) {
-            for (const model of provider.models || []) {
-                models.push({
-                    id: `${provider.id}/${model.id}`,
-                    object: 'model',
-                    created: 1234567890,
-                    owned_by: provider.id
-                });
+        const providersList = providers.data?.providers || [];
+        for (const provider of providersList) {
+            const providerId = provider.id;
+            const modelsData = provider.models || {};
+
+            if (Array.isArray(modelsData)) {
+                for (const model of modelsData) {
+                    models.push({
+                        id: `${providerId}/${model.id}`,
+                        object: 'model',
+                        created: 1234567890,
+                        owned_by: providerId
+                    });
+                }
+            } else {
+                for (const modelId in modelsData) {
+                    models.push({
+                        id: `${providerId}/${modelId}`,
+                        object: 'model',
+                        created: 1234567890,
+                        owned_by: providerId
+                    });
+                }
             }
         }
 
@@ -54,7 +69,7 @@ app.post('/v1/responses', async (req, res) => {
         const { messages, model } = req.body;
         const sessionId = await getOrCreateSession('default');
 
-        const lastMessage = messages.filter(m => m.role === 'user').pop();
+        const lastMessage = (messages || []).filter(m => m.role === 'user').pop();
         if (!lastMessage) {
             return res.status(400).json({ error: 'No user message' });
         }
@@ -80,27 +95,36 @@ app.post('/v1/responses', async (req, res) => {
             }
         })}\n\n`);
 
+        console.log(`Sending prompt to OpenCode...`);
         // Send prompt with noReply to enable polling
-        await opencode.session.prompt({
-            path: { id: sessionId },
-            body: {
-                parts: [{ type: 'text', text: lastMessage.content }],
-                noReply: true
-            }
-        });
+        try {
+            await opencode.session.prompt({
+                path: { id: sessionId },
+                body: {
+                    parts: [{ type: 'text', text: lastMessage.content }],
+                    noReply: true
+                }
+            });
+            console.log(`Prompt sent (noReply: true)`);
+        } catch (e) {
+            console.error(`Prompt error:`, e);
+            throw e;
+        }
 
         // Poll for assistant response
         let previousMessageCount = 0;
         let isComplete = false;
         let totalText = '';
 
+        console.log(`Starting polling for session ${sessionId}...`);
         const pollInterval = setInterval(async () => {
             try {
-                const messages = await opencode.session.messages({
+                const messagesResp = await opencode.session.messages({
                     path: { id: sessionId }
                 });
 
-                const assistantMessages = messages.data.filter(m => m.info.role === 'assistant');
+                const assistantMessages = (messagesResp.data || []).filter(m => m.info?.role === 'assistant');
+                console.log(`Polled: ${assistantMessages.length} assistant messages found.`);
 
                 // Check for new messages
                 if (assistantMessages.length > previousMessageCount) {
@@ -108,6 +132,7 @@ app.post('/v1/responses', async (req, res) => {
 
                     // Event 2: response.output_item.added (first time only)
                     if (previousMessageCount === 0) {
+                        console.log(`First assistant message detected.`);
                         res.write(`event: response.output_item.added\n`);
                         res.write(`data: ${JSON.stringify({
                             type: 'response.output_item.added',
@@ -120,7 +145,7 @@ app.post('/v1/responses', async (req, res) => {
                     }
 
                     // Event 3: response.output_text.delta (incremental text)
-                    for (const part of latestMessage.parts) {
+                    for (const part of latestMessage.parts || []) {
                         if (part.type === 'text' && part.text) {
                             const newText = part.text.substring(totalText.length);
                             if (newText) {
@@ -139,8 +164,10 @@ app.post('/v1/responses', async (req, res) => {
 
                 // Check session status
                 const session = await opencode.session.get({ path: { id: sessionId } });
+                console.log(`Session status: ${session.data?.status}`);
 
-                if (session.data.status === 'idle' || session.data.status === 'error') {
+                if (session.data?.status === 'idle' || session.data?.status === 'error') {
+                    console.log(`Session complete (status: ${session.data?.status}).`);
                     isComplete = true;
                     clearInterval(pollInterval);
 
@@ -212,7 +239,9 @@ app.post('/v1/responses', async (req, res) => {
 
     } catch (error) {
         console.error('Responses error:', error);
-        res.status(500).json({ error: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
 });
 
@@ -221,7 +250,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     try {
         const { messages, stream = false } = req.body;
         const sessionId = await getOrCreateSession('default');
-        const lastMessage = messages.filter(m => m.role === 'user').pop();
+        const lastMessage = (messages || []).filter(m => m.role === 'user').pop();
+
+        if (!lastMessage) {
+            return res.status(400).json({ error: 'No user message' });
+        }
 
         console.log(`[/v1/chat/completions] Session: ${sessionId}, Query: ${lastMessage.content}`);
 
@@ -232,7 +265,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 body: { parts: [{ type: 'text', text: lastMessage.content }] }
             });
 
-            const content = response.data.parts
+            const content = (response.data?.parts || [])
                 .filter(p => p.type === 'text')
                 .map(p => p.text || '')
                 .join('\n');
@@ -259,27 +292,33 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         let prevCount = 0;
         const poll = setInterval(async () => {
-            const msgs = await opencode.session.messages({ path: { id: sessionId } });
-            const assistantMsgs = msgs.data.filter(m => m.info.role === 'assistant');
+            try {
+                const msgs = await opencode.session.messages({ path: { id: sessionId } });
+                const assistantMsgs = (msgs.data || []).filter(m => m.info?.role === 'assistant');
 
-            if (assistantMsgs.length > prevCount) {
-                const latest = assistantMsgs[assistantMsgs.length - 1];
-                for (const part of latest.parts) {
-                    if (part.type === 'text') {
-                        res.write(`data: ${JSON.stringify({
-                            id: `chatcmpl-${sessionId}`,
-                            object: 'chat.completion.chunk',
-                            choices: [{ index: 0, delta: { content: part.text }, finish_reason: null }]
-                        })}\n\n`);
+                if (assistantMsgs.length > prevCount) {
+                    const latest = assistantMsgs[assistantMsgs.length - 1];
+                    for (const part of latest.parts || []) {
+                        if (part.type === 'text') {
+                            res.write(`data: ${JSON.stringify({
+                                id: `chatcmpl-${sessionId}`,
+                                object: 'chat.completion.chunk',
+                                choices: [{ index: 0, delta: { content: part.text }, finish_reason: null }]
+                            })}\n\n`);
+                        }
                     }
+                    prevCount = assistantMsgs.length;
                 }
-                prevCount = assistantMsgs.length;
-            }
 
-            const session = await opencode.session.get({ path: { id: sessionId } });
-            if (session.data.status === 'idle') {
+                const session = await opencode.session.get({ path: { id: sessionId } });
+                if (session.data?.status === 'idle') {
+                    clearInterval(poll);
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                }
+            } catch (e) {
+                console.error('Chat completions poll error:', e);
                 clearInterval(poll);
-                res.write('data: [DONE]\n\n');
                 res.end();
             }
         }, 300);
@@ -287,7 +326,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         setTimeout(() => { clearInterval(poll); res.end(); }, 60000);
 
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Chat completions error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
 });
 
@@ -295,9 +337,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.get('/health', async (req, res) => {
     try {
         const health = await opencode.global.health();
-        res.json({ bridge: 'online', opencode: health });
+        res.json({ bridge: 'online', opencode: health.data || health });
     } catch (error) {
-        res.status(503).json({ bridge: 'online', opencode: 'unreachable' });
+        res.status(503).json({ bridge: 'online', opencode: 'unreachable', error: error.message });
     }
 });
 
