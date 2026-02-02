@@ -7,7 +7,7 @@ import fetch from 'node-fetch';
 const app = express();
 app.use(express.json());
 
-const OPENCODE_BASE = 'http://127.0.0.1:4096';
+const OPENCODE_BASE = process.env.OPENCODE_BASE_URL || 'http://127.0.0.1:4096';
 const opencode = createOpencodeClient({ baseUrl: OPENCODE_BASE });
 const sessions = new Map();
 
@@ -239,4 +239,4 @@ app.post('/v1/responses', async (req, res) => {
     }
 });
 
-app.listen(8083, () => console.log('Solution 4 Bridge (Status Polling) on http://localhost:8083'));
+app.listen(8083, '0.0.0.0', () => console.log('Solution 4 Bridge (Status Polling) on http://0.0.0.0:8083'));
