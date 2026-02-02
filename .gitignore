@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.gemini/
+.DS_Store
+package-lock.json
